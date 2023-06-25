@@ -1,6 +1,16 @@
-#include "pokemon_app.h"
+#include <furi.h>
+#include <furi_hal_light.h>
+#include <gui/gui.h>
+#include <gui/view.h>
+#include <gui/view_dispatcher.h>
+#include <gui/icon.h>
+#include <pokemon_icons.h>
 
-struct pokemon_lut pokemon_table[] = {
+#include "pokemon_app.h"
+#include "views/trade.hpp"
+#include "views/select_pokemon.hpp"
+
+const PokemonTable pokemon_table[] = {
     {"Bulbasaur", &I_bulbasaur, 0x99},
     {"Ivysaur", &I_ivysaur, 0x09},
     {"Venusaur", &I_venusaur, 0x9A},
@@ -155,70 +165,125 @@ struct pokemon_lut pokemon_table[] = {
     {},
 };
 
+TradeBlock OUTPUT_BLOCK = {
+    .trainer_name = {F_, l_, i_, p_, p_, e_, r_, TERM_, 0x00, 0x00, 0x00},
+    .party_cnt = 1,
+    /* Only the first pokemon is ever used even though there are 7 bytes here.
+     * If the remaining 6 bytes are _not_ 0xff, then the trade window renders
+     * garbage for the Flipper's party.
+     */
+    .party_members = {0x15, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+    /* Only the first pokemon is set up, even though there are 6 total party members */
+    .party =
+        {
+            {.species = 0x4a,
+             .hp = 0x2c01,
+             .level = 0x4a,
+             .status_condition = 0x0,
+             .type = {0x14, 0x08},
+             .catch_held = 0x1f,
+             .move = {0x7e, 0x38, 0x09, 0x19},
+             .orig_trainer = 0xd204,
+             .exp = {0x3, 0xd, 0x40},
+             .hp_ev = 0xffff,
+             .atk_ev = 0xffff,
+             .def_ev = 0xffff,
+             .spd_ev = 0xffff,
+             .special_ev = 0xffff,
+             .iv = 0xffff,
+             .move_pp = {0xc0, 0xc0, 0xc0, 0xc0},
+             .level_again = 0x4a,
+             .max_hp = 0x2c01,
+             .atk = 0x9600,
+             .def = 0x9700,
+             .spd = 0x9800,
+             .special = 0x9900},
+        },
+    /* Only the first pokemon has an OT name and nickname even though there are 6 members */
+    /* NOTE: I think this shouldn't exceed 7 chars */
+    .ot_name =
+        {
+            {.str = {F_, l_, i_, p_, p_, e_, r_, TERM_, 0x00, 0x00}},
+        },
+    .nickname = {
+        {.str = {F_, l_, o_, p_, p_, e_, r_, TERM_, 0x00, 0x00}},
+    }};
+
 uint32_t pokemon_exit_confirm_view(void* context) {
     UNUSED(context);
     return AppViewExitConfirm;
 }
-App* pokemon_alloc() {
-    App* app = (App*)malloc(sizeof(App));
 
-    // Gui
-    app->gui = (Gui*)furi_record_open(RECORD_GUI);
+PokemonFap* pokemon_alloc() {
+    PokemonFap* pokemon_fap = (PokemonFap*)malloc(sizeof(PokemonFap));
+
     // View dispatcher
-    app->view_dispatcher = view_dispatcher_alloc();
+    pokemon_fap->view_dispatcher = view_dispatcher_alloc();
 
-    view_dispatcher_enable_queue(app->view_dispatcher);
-    view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
-    view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
+    view_dispatcher_enable_queue(pokemon_fap->view_dispatcher);
+    view_dispatcher_set_event_callback_context(pokemon_fap->view_dispatcher, pokemon_fap);
+    view_dispatcher_attach_to_gui(
+        pokemon_fap->view_dispatcher,
+        (Gui*)furi_record_open(RECORD_GUI),
+        ViewDispatcherTypeFullscreen);
 
     //  Start Index first pokemon
-    app->current_pokemon = 0;
+    pokemon_fap->curr_pokemon = 0;
+
+    // Set up pointer to pokemon table
+    pokemon_fap->pokemon_table = pokemon_table;
+
+    // Set up trade party struct
+    pokemon_fap->trade_party = &OUTPUT_BLOCK;
+
     // Select Pokemon View
-    app->select_pokemon = select_pokemon_alloc(app);
-    view_set_previous_callback(select_pokemon_get_view(app), pokemon_exit_confirm_view);
+    pokemon_fap->select_view = select_pokemon_alloc(pokemon_fap);
+    view_set_previous_callback(pokemon_fap->select_view, pokemon_exit_confirm_view);
     view_dispatcher_add_view(
-        app->view_dispatcher, AppViewSelectPokemon, select_pokemon_get_view(app));
+        pokemon_fap->view_dispatcher, AppViewSelectPokemon, pokemon_fap->select_view);
 
     // Trade View
-    app->trade = trade_alloc(app);
-    view_set_previous_callback(trade_get_view(app), pokemon_exit_confirm_view);
-    view_dispatcher_add_view(app->view_dispatcher, AppViewTrade, trade_get_view(app));
+    pokemon_fap->trade_view = trade_alloc(pokemon_fap);
+    view_set_previous_callback(pokemon_fap->trade_view, pokemon_exit_confirm_view);
+    view_dispatcher_add_view(pokemon_fap->view_dispatcher, AppViewTrade, pokemon_fap->trade_view);
 
-    view_dispatcher_switch_to_view(app->view_dispatcher, AppViewSelectPokemon);
+    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewSelectPokemon);
 
-    return app;
+    return pokemon_fap;
 }
 
-void free_app(App* app) {
-    furi_assert(app);
+void free_app(PokemonFap* pokemon_fap) {
+    furi_assert(pokemon_fap);
 
     // Free views
-    view_dispatcher_remove_view(app->view_dispatcher, AppViewSelectPokemon);
-    select_pokemon_free(app);
-    view_dispatcher_remove_view(app->view_dispatcher, AppViewTrade);
-    trade_free(app);
+    view_dispatcher_remove_view(pokemon_fap->view_dispatcher, AppViewSelectPokemon);
+    select_pokemon_free(pokemon_fap);
+
+    view_dispatcher_remove_view(pokemon_fap->view_dispatcher, AppViewTrade);
+    trade_free(pokemon_fap);
+
     // Close records
     furi_record_close(RECORD_GUI);
-    app->gui = NULL;
 
     // Free rest
-    free(app);
+    free(pokemon_fap);
+    pokemon_fap = NULL;
 }
 
 extern "C" int32_t pokemon_app(void* p) {
     UNUSED(p);
-    //FURI_LOG_D(TAG, "init scene");
-    App* app = (App*)pokemon_alloc();
+    //App* app = (App*)pokemon_alloc();
+    PokemonFap* pokemon_fap = pokemon_alloc();
 
     furi_hal_light_set(LightRed, 0x00);
     furi_hal_light_set(LightGreen, 0x00);
     furi_hal_light_set(LightBlue, 0x00);
-    //switch view  and run dispatcher
-    view_dispatcher_run(app->view_dispatcher);
+
+    //switch view and run dispatcher
+    view_dispatcher_run(pokemon_fap->view_dispatcher);
 
     // Free resources
-    free_app(app);
-    furi_record_close(RECORD_GUI);
+    free_app(pokemon_fap);
 
     return 0;
 }

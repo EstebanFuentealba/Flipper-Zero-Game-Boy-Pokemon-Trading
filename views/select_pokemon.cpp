@@ -1,21 +1,25 @@
+#include <furi.h>
+#include <gui/view.h>
+#include <gui/view_dispatcher.h>
+#include <gui/elements.h>
+#include <pokemon_icons.h>
+#include <string>
+
 #include "../pokemon_app.h"
-#include "select_pokemon.hpp"
 
-static void select_pokemon_render_callback(Canvas* canvas, void* context) {
-    canvas_clear(canvas);
-
-    SelectPokemonModel* model = (SelectPokemonModel*)context;
-    const uint8_t current_index = model->current_pokemon;
+static void select_pokemon_render_callback(Canvas* canvas, void* model) {
+    PokemonFap* pokemon_fap = *(PokemonFap**)model;
+    const uint8_t current_index = pokemon_fap->curr_pokemon;
     char pokedex_num[5];
 
     snprintf(pokedex_num, sizeof(pokedex_num), "#%03d", current_index + 1);
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str_aligned(
-        canvas, 55, 54 / 2, AlignLeft, AlignTop, pokemon_table[current_index].name);
+        canvas, 55, 54 / 2, AlignLeft, AlignTop, pokemon_fap->pokemon_table[current_index].name);
 
     canvas_set_font(canvas, FontSecondary);
     canvas_draw_str_aligned(canvas, 55, 38, AlignLeft, AlignTop, pokedex_num);
-    canvas_draw_icon(canvas, 0, 0, pokemon_table[current_index].icon);
+    canvas_draw_icon(canvas, 0, 0, pokemon_fap->pokemon_table[current_index].icon);
     canvas_draw_icon(canvas, 128 - 80, 0, &I_Space_80x18);
     canvas_draw_str_aligned(canvas, (128 - 40), 5, AlignCenter, AlignTop, "Select Pokemon");
 
@@ -24,83 +28,74 @@ static void select_pokemon_render_callback(Canvas* canvas, void* context) {
 }
 
 static bool select_pokemon_input_callback(InputEvent* event, void* context) {
-    furi_assert(context);
-    SelectPokemon* select_pokemon = (SelectPokemon*)context;
+    PokemonFap* pokemon_fap = (PokemonFap*)context;
+    int pokemon_num = pokemon_fap->curr_pokemon;
     bool consumed = false;
 
-    if(event->type == InputTypePress && event->key == InputKeyOk) {
-        with_view_model_cpp(
-            select_pokemon->view,
-            SelectPokemonModel*,
-            model,
-            {
-                select_pokemon->app->current_pokemon = model->current_pokemon;
-                select_pokemon->app->pokemon_hex_code = pokemon_table[model->current_pokemon].hex;
-            },
-            false);
-        view_dispatcher_switch_to_view(select_pokemon->app->view_dispatcher, AppViewTrade);
+    furi_assert(context);
+
+    /* We only handle InputTypePress at the moment */
+    if(event->type != InputTypePress) return consumed;
+
+    switch(event->key) {
+    /* Advance to next view with the selected pokemon */
+    case InputKeyOk:
+        view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewTrade);
         consumed = true;
-    } else if(event->type == InputTypePress && event->key == InputKeyBack) {
-        view_dispatcher_switch_to_view(select_pokemon->app->view_dispatcher, VIEW_NONE);
+        break;
+
+    /* Return to the previous view */
+    case InputKeyBack:
+        view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, VIEW_NONE);
         consumed = true;
-    } else if(event->type == InputTypePress && event->key == InputKeyLeft) {
-        with_view_model_cpp(
-            select_pokemon->view,
-            SelectPokemonModel*,
-            model,
-            {
-                if(model->current_pokemon == 0) {
-                    model->current_pokemon = 150;
-                } else {
-                    model->current_pokemon--;
-                }
-            },
-            true);
+        break;
+
+    /* Move back one through the pokedex listing */
+    case InputKeyLeft:
+        if(pokemon_num == 0)
+            pokemon_num = 150;
+        else
+            pokemon_num--;
         consumed = true;
-    } else if(event->type == InputTypePress && event->key == InputKeyDown) {
-        with_view_model_cpp(
-            select_pokemon->view,
-            SelectPokemonModel*,
-            model,
-            {
-                if(model->current_pokemon >= 10) {
-                    model->current_pokemon -= 10;
-                } else {
-                    model->current_pokemon = 150;
-                }
-            },
-            true);
+        break;
+
+    /* Move back ten through the pokemon listing, wrap to max pokemon on
+         * underflow.
+         */
+    case InputKeyDown:
+        if(pokemon_num >= 10)
+            pokemon_num -= 10;
+        else
+            pokemon_num = 150;
         consumed = true;
-    } else if(event->type == InputTypePress && event->key == InputKeyRight) {
-        with_view_model_cpp(
-            select_pokemon->view,
-            SelectPokemonModel*,
-            model,
-            {
-                if(model->current_pokemon == 150) {
-                    model->current_pokemon = 0;
-                } else {
-                    model->current_pokemon++;
-                }
-            },
-            true);
+        break;
+
+    /* Move forward one through the pokedex listing */
+    case InputKeyRight:
+        if(pokemon_num == 150)
+            pokemon_num = 0;
+        else
+            pokemon_num++;
         consumed = true;
-    } else if(event->type == InputTypePress && event->key == InputKeyUp) {
-        with_view_model_cpp(
-            select_pokemon->view,
-            SelectPokemonModel*,
-            model,
-            {
-                if(model->current_pokemon <= 140) {
-                    model->current_pokemon += 10;
-                } else {
-                    model->current_pokemon = 0;
-                    ;
-                }
-            },
-            true);
+        break;
+
+    /* Move forward ten through the pokemon listing, wrap to min pokemon on
+         * overflow.
+         */
+    case InputKeyUp:
+        if(pokemon_num <= 140)
+            pokemon_num += 10;
+        else
+            pokemon_num = 0;
         consumed = true;
+        break;
+
+    default:
+        // Do Nothing
+        break;
     }
+
+    pokemon_fap->curr_pokemon = pokemon_num;
 
     return consumed;
 }
@@ -111,10 +106,10 @@ void select_pokemon_enter_callback(void* context) {
 }
 
 bool select_pokemon_custom_callback(uint32_t event, void* context) {
+    PokemonFap* pokemon_fap = (PokemonFap*)context;
     UNUSED(event);
     furi_assert(context);
-    SelectPokemon* select_pokemon = (SelectPokemon*)context;
-    view_dispatcher_send_custom_event(select_pokemon->app->view_dispatcher, 0);
+    view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, 0);
     return true;
 }
 
@@ -123,38 +118,26 @@ void select_pokemon_exit_callback(void* context) {
     UNUSED(context);
 }
 
-SelectPokemon* select_pokemon_alloc(App* app) {
-    SelectPokemon* select_pokemon = (SelectPokemon*)malloc(sizeof(SelectPokemon));
-    select_pokemon->app = app;
-    select_pokemon->view = view_alloc();
-    view_set_context(select_pokemon->view, select_pokemon);
-    view_allocate_model(select_pokemon->view, ViewModelTypeLockFree, sizeof(SelectPokemonModel));
+View* select_pokemon_alloc(PokemonFap* pokemon_fap) {
+    View* view;
+
+    view = view_alloc();
+
+    view_set_context(view, pokemon_fap);
+    view_allocate_model(view, ViewModelTypeLockFree, sizeof(PokemonFap**));
     with_view_model_cpp(
-        select_pokemon->view,
-        SelectPokemonModel*,
-        model,
-        {
-            model->current_pokemon = app->current_pokemon;
-            model->pokemon_hex_code = app->pokemon_hex_code;
-        },
-        true);
+        view, PokemonFap**, model_fap, { *model_fap = pokemon_fap; }, false);
 
-    view_set_draw_callback(select_pokemon->view, select_pokemon_render_callback);
-    view_set_input_callback(select_pokemon->view, select_pokemon_input_callback);
-    view_set_enter_callback(select_pokemon->view, select_pokemon_enter_callback);
-    view_set_custom_callback(select_pokemon->view, select_pokemon_custom_callback);
+    view_set_draw_callback(view, select_pokemon_render_callback);
+    view_set_input_callback(view, select_pokemon_input_callback);
+    view_set_enter_callback(view, select_pokemon_enter_callback);
+    view_set_custom_callback(view, select_pokemon_custom_callback);
 
-    view_set_exit_callback(select_pokemon->view, select_pokemon_exit_callback);
-    return select_pokemon;
+    view_set_exit_callback(view, select_pokemon_exit_callback);
+    return view;
 }
 
-void select_pokemon_free(App* app) {
-    furi_assert(app->select_pokemon);
-    view_free(app->select_pokemon->view);
-    free(app->select_pokemon);
-}
-
-View* select_pokemon_get_view(App* app) {
-    furi_assert(app->select_pokemon);
-    return app->select_pokemon->view;
+void select_pokemon_free(PokemonFap* pokemon_fap) {
+    furi_assert(pokemon_fap);
+    view_free(pokemon_fap->select_view);
 }

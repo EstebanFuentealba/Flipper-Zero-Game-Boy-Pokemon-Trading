@@ -1,8 +1,60 @@
+#include <furi.h>
+#include <furi_hal.h>
+#include <furi_hal_light.h>
+#include <gui/view.h>
+#include <gui/view_dispatcher.h>
+#include <pokemon_icons.h>
+
 #include "../pokemon_app.h"
 #include "trade.hpp"
 
 #include "../pokemon_data.h"
 
+#define GAME_BOY_CLK gpio_ext_pb2
+#define GAME_BOY_SI gpio_ext_pc3
+#define GAME_BOY_SO gpio_ext_pb3
+
+#define DELAY_MICROSECONDS 15
+#define PKMN_BLANK 0x00
+
+#define ITEM_1_HIGHLIGHTED 0xD0
+#define ITEM_2_HIGHLIGHTED 0xD1
+#define ITEM_3_HIGHLIGHTED 0xD2
+#define ITEM_1_SELECTED 0xD4
+#define ITEM_2_SELECTED 0xD5
+#define ITEM_3_SELECTED 0xD6
+
+#define PKMN_MASTER 0x01
+#define PKMN_SLAVE 0x02
+#define PKMN_CONNECTED 0x60
+#define PKMN_WAIT 0x7F
+
+#define PKMN_ACTION 0x60
+
+#define PKMN_TRADE_CENTRE ITEM_1_SELECTED
+#define PKMN_COLOSSEUM ITEM_2_SELECTED
+#define PKMN_BREAK_LINK ITEM_3_SELECTED
+
+#define TRADE_CENTRE_WAIT 0xFD
+
+typedef unsigned char byte;
+typedef enum { NOT_CONNECTED, CONNECTED, TRADE_CENTRE, COLOSSEUM } connection_state_t;
+typedef enum {
+    INIT,
+    READY_TO_GO,
+    SEEN_FIRST_WAIT,
+    SENDING_RANDOM_DATA,
+    WAITING_TO_SEND_DATA,
+    START_SENDING_DATA,
+    SENDING_DATA,
+    DATA_SENT,
+    SENDING_PATCH_DATA,
+    TRADE_PENDING,
+    TRADE_CONFIRMATION,
+    DONE
+} trade_centre_state_t;
+
+/* TODO: Convert all of these to be maintained in a struct in the Trade context */
 uint8_t out_data = 0;
 uint8_t in_data = 0;
 uint8_t shift = 0;
@@ -11,6 +63,7 @@ volatile int counter = 0;
 volatile bool procesing = true;
 volatile connection_state_t connection_state = NOT_CONNECTED;
 volatile trade_centre_state_t trade_centre_state = INIT;
+unsigned char INPUT_BLOCK[405];
 
 void screen_gameboy_connect(Canvas* const canvas) {
     canvas_draw_frame(canvas, 0, 0, 128, 64);
@@ -31,23 +84,26 @@ void screen_gameboy_connected(Canvas* const canvas) {
 
 int time_in_seconds = 0;
 
-static void trade_draw_callback(Canvas* canvas, void* context) {
+static void trade_draw_callback(Canvas* canvas, void* model) {
+    const char* gameboy_status_text = NULL;
+    PokemonFap* pokemon_fap = *(PokemonFap**)model;
+
     canvas_clear(canvas);
-    SelectPokemonModel* model = (SelectPokemonModel*)context;
-    if(!model->trading) {
-        if(!model->connected) {
+    if(!pokemon_fap->trading) {
+        if(!pokemon_fap->connected) {
             furi_hal_light_set(LightGreen, 0x00);
             furi_hal_light_set(LightBlue, 0x00);
             furi_hal_light_set(LightRed, 0xff);
             screen_gameboy_connect(canvas);
-        } else if(model->connected) {
+        } else {
             furi_hal_light_set(LightGreen, 0xff);
             furi_hal_light_set(LightBlue, 0x00);
             furi_hal_light_set(LightRed, 0x00);
             screen_gameboy_connected(canvas);
         }
     } else {
-        if(model->gameboy_status == GAMEBOY_TRADING) {
+        switch(pokemon_fap->gameboy_status) {
+        case GAMEBOY_TRADING:
             furi_hal_light_set(LightGreen, 0x00);
             furi_hal_light_set(LightRed, 0x00);
             if(time_in_seconds % 2 == 1) {
@@ -57,29 +113,44 @@ static void trade_draw_callback(Canvas* canvas, void* context) {
                 furi_hal_light_set(LightBlue, 0x00);
                 canvas_draw_icon(canvas, 0, 0, &I_gb_step_2);
             }
-        } else if(
-            model->gameboy_status == GAMEBOY_READY || model->gameboy_status == GAMEBOY_WAITING ||
-            model->gameboy_status == GAMEBOY_SEND) {
-            canvas_draw_icon(canvas, 38, 11, pokemon_table[model->current_pokemon].icon);
+            break;
+        case GAMEBOY_READY:
+        case GAMEBOY_WAITING:
+        case GAMEBOY_SEND:
+            canvas_draw_icon(
+                canvas, 38, 11, pokemon_fap->pokemon_table[pokemon_fap->curr_pokemon].icon);
+            break;
+        default:
+            // Default state added to eliminated enum warning
+            break;
         }
         canvas_draw_icon(canvas, 0, 53, &I_Background_128x11);
 
         canvas_draw_frame(canvas, 0, 0, 128, 64);
         canvas_draw_icon(canvas, 24, 0, &I_Space_80x18);
 
-        const char* gameboy_status_text = "INITIAL";
-        if(model->gameboy_status == GAMEBOY_READY) {
+        switch(pokemon_fap->gameboy_status) {
+        case GAMEBOY_READY:
             gameboy_status_text = "READY";
-        } else if(model->gameboy_status == GAMEBOY_WAITING) {
+            break;
+        case GAMEBOY_WAITING:
             gameboy_status_text = "WAITING";
-        } else if(model->gameboy_status == GAMEBOY_TRADE_READY) {
+            break;
+        case GAMEBOY_TRADE_READY:
             gameboy_status_text = "READY";
-        } else if(model->gameboy_status == GAMEBOY_SEND) {
+            break;
+        case GAMEBOY_SEND:
             gameboy_status_text = "DEAL...";
-        } else if(model->gameboy_status == GAMEBOY_PENDING) {
+            break;
+        case GAMEBOY_PENDING:
             gameboy_status_text = "PENDING...";
-        } else if(model->gameboy_status == GAMEBOY_TRADING) {
+            break;
+        case GAMEBOY_TRADING:
             gameboy_status_text = "TRADING...";
+            break;
+        default:
+            gameboy_status_text = "INITIAL";
+            break;
         }
 
         canvas_draw_str(canvas, 48, 12, gameboy_status_text);
@@ -91,12 +162,13 @@ static void trade_draw_callback(Canvas* canvas, void* context) {
 }
 
 static bool trade_input_callback(InputEvent* event, void* context) {
-    furi_assert(context);
-    Trade* trade = (Trade*)context;
     bool consumed = false;
+    PokemonFap* pokemon_fap = (PokemonFap*)context;
+
+    furi_assert(context);
 
     if(event->type == InputTypePress && event->key == InputKeyBack) {
-        view_dispatcher_switch_to_view(trade->app->view_dispatcher, AppViewSelectPokemon);
+        view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewSelectPokemon);
         consumed = true;
     }
 
@@ -106,186 +178,217 @@ static bool trade_input_callback(InputEvent* event, void* context) {
 uint32_t micros() {
     return DWT->CYCCNT / 64;
 }
+
+/* Get the response byte from the link partner, updating the connection
+ * state if needed.
+ */
 byte getConnectResponse(byte in) {
-    if(in == PKMN_CONNECTED) {
+    byte ret;
+
+    switch(in) {
+    case PKMN_CONNECTED:
         connection_state = CONNECTED;
-        return PKMN_CONNECTED;
+        ret = PKMN_CONNECTED;
+        break;
+    case PKMN_MASTER:
+        ret = PKMN_SLAVE;
+        break;
+    case PKMN_BLANK:
+        ret = PKMN_BLANK;
+        break;
+    default:
+        connection_state = NOT_CONNECTED;
+        ret = PKMN_BREAK_LINK;
+        break;
     }
 
-    if(in == PKMN_MASTER) {
-        return PKMN_SLAVE;
-    }
-
-    if(in == PKMN_BLANK) {
-        return PKMN_BLANK;
-    }
-
-    connection_state = NOT_CONNECTED;
-    return PKMN_BREAK_LINK;
+    return ret;
 }
+
+/* Figure out what the pokemon game is requesting and move to that mode.
+ */
 byte getMenuResponse(byte in) {
+    /* TODO: Find out what this byte means */
     byte response = 0x00;
-    if(in == PKMN_CONNECTED) {
+
+    switch(in) {
+    case PKMN_CONNECTED:
         response = PKMN_CONNECTED;
-    } else if(in == PKMN_TRADE_CENTRE) {
+        break;
+    case PKMN_TRADE_CENTRE:
         connection_state = TRADE_CENTRE;
-    } else if(in == PKMN_COLOSSEUM) {
+        break;
+    case PKMN_COLOSSEUM:
         connection_state = COLOSSEUM;
-    } else if(in == PKMN_BREAK_LINK || in == PKMN_MASTER) {
+        break;
+    case PKMN_BREAK_LINK:
+    case PKMN_MASTER:
         connection_state = NOT_CONNECTED;
         response = PKMN_BREAK_LINK;
-    } else {
+        break;
+    default:
         response = in;
+        break;
     }
+
     return response;
 }
 
 byte getTradeCentreResponse(byte in, void* context) {
-    UNUSED(context);
-    Trade* trade = (Trade*)context;
-    byte send = 0x00;
-    if(trade_centre_state == INIT && in == 0x00) {
-        if(counter++ == 5) {
-            trade_centre_state = READY_TO_GO;
-            //  CLICK EN LA MESA
-            with_view_model_cpp(
-                trade->view,
-                SelectPokemonModel*,
-                model,
-                { model->gameboy_status = GAMEBOY_READY; },
-                false);
-        }
-        send = in;
-    } else if(trade_centre_state == READY_TO_GO && (in & 0xF0) == 0xF0) {
-        trade_centre_state = SEEN_FIRST_WAIT;
-        send = in;
-    } else if(trade_centre_state == SEEN_FIRST_WAIT && (in & 0xF0) != 0xF0) {
-        send = in;
-        counter = 0;
-        trade_centre_state = SENDING_RANDOM_DATA;
-    } else if(trade_centre_state == SENDING_RANDOM_DATA && (in & 0xF0) == 0xF0) {
-        if(counter++ == 5) {
-            trade_centre_state = WAITING_TO_SEND_DATA;
+    PokemonFap* pokemon_fap = (PokemonFap*)context;
+    uint8_t* trade_party_flat = (uint8_t*)pokemon_fap->trade_party;
+    byte send = in;
 
-            with_view_model_cpp(
-                trade->view,
-                SelectPokemonModel*,
-                model,
-                { model->gameboy_status = GAMEBOY_WAITING; },
-                false);
+    furi_assert(context);
+
+    switch(trade_centre_state) {
+    case INIT:
+        // TODO: What does this value of in mean?
+        if(in == 0x00) {
+            // TODO: What does counter signify here?
+            if(counter == 5) {
+                trade_centre_state = READY_TO_GO;
+                //  CLICK EN LA MESA
+                pokemon_fap->gameboy_status = GAMEBOY_READY;
+            }
+            counter++;
         }
-        send = in;
-    } else if(trade_centre_state == WAITING_TO_SEND_DATA && (in & 0xF0) != 0xF0) {
-        counter = 0;
-        INPUT_BLOCK[counter] = in;
-        send = DATA_BLOCK[counter++];
-        trade_centre_state = SENDING_DATA;
-    } else if(trade_centre_state == SENDING_DATA) {
-        INPUT_BLOCK[counter] = in;
-        send = DATA_BLOCK[counter++];
-        if(counter == 405) {
-            trade_centre_state = SENDING_PATCH_DATA;
+        break;
+
+    case READY_TO_GO:
+        if((in & 0xF0) == 0xF0) trade_centre_state = SEEN_FIRST_WAIT;
+        break;
+
+    case SEEN_FIRST_WAIT:
+        if((in & 0xF0) != 0xF0) {
+            counter = 0;
+            trade_centre_state = SENDING_RANDOM_DATA;
         }
-    } else if(trade_centre_state == SENDING_PATCH_DATA && in == 0xFD) {
-        counter = 0;
-        send = 0xFD;
-    } else if(trade_centre_state == SENDING_PATCH_DATA && in != 0xFD) {
-        send = in;
+        break;
+
+    case SENDING_RANDOM_DATA:
+        if((in & 0xF0) == 0xF0) {
+            if(counter == 5) {
+                trade_centre_state = WAITING_TO_SEND_DATA;
+                pokemon_fap->gameboy_status = GAMEBOY_WAITING;
+            }
+            counter++;
+        }
+        break;
+
+    case WAITING_TO_SEND_DATA:
+        if((in & 0xF0) != 0xF0) {
+            counter = 0;
+            INPUT_BLOCK[counter] = in;
+            send = trade_party_flat[counter];
+            counter++;
+            trade_centre_state = SENDING_DATA;
+        }
+        break;
+
+    case SENDING_DATA:
+        INPUT_BLOCK[counter] = in;
+        send = trade_party_flat[counter];
         counter++;
-        if(counter == 197) {
-            trade_centre_state = TRADE_PENDING;
-        }
-    } else if(trade_centre_state == TRADE_PENDING && (in & 0x60) == 0x60) {
-        if(in == 0x6f) {
-            trade_centre_state = READY_TO_GO;
-            send = 0x6f;
-            with_view_model_cpp(
-                trade->view,
-                SelectPokemonModel*,
-                model,
-                { model->gameboy_status = GAMEBOY_TRADE_READY; },
-                false);
+        if(counter == 405) //TODO: replace with sizeof struct rather than static number
+            trade_centre_state = SENDING_PATCH_DATA;
+        break;
 
+    case SENDING_PATCH_DATA:
+        if(in == 0xFD) {
+            counter = 0;
+            send = 0xFD;
         } else {
-            send = 0x60; // first pokemon
-            with_view_model_cpp(
-                trade->view,
-                SelectPokemonModel*,
-                model,
-                { model->gameboy_status = GAMEBOY_SEND; },
-                false);
+            counter++;
+            if(counter == 197) // TODO: What is this magic value?
+                trade_centre_state = TRADE_PENDING;
         }
-    } else if(trade_centre_state == TRADE_PENDING && in == 0x00) {
-        send = 0;
-        trade_centre_state = TRADE_CONFIRMATION;
+        break;
 
-    } else if(trade_centre_state == TRADE_CONFIRMATION && (in & 0x60) == 0x60) {
-        send = in;
+    case TRADE_PENDING:
+        /* TODO: What are these states */
+        if(in == 0x6F) {
+            trade_centre_state = READY_TO_GO;
+            send = 0x6F;
+            pokemon_fap->gameboy_status = GAMEBOY_TRADE_READY;
+        } else if((in & 0x60) == 0x60) {
+            send = 0x60; // first pokemon
+            pokemon_fap->gameboy_status = GAMEBOY_SEND;
+        } else if(in == 0x00) {
+            send = 0;
+            trade_centre_state = TRADE_CONFIRMATION;
+        }
+        break;
+
+    case TRADE_CONFIRMATION:
         if(in == 0x61) {
             trade_centre_state = TRADE_PENDING;
-            with_view_model_cpp(
-                trade->view,
-                SelectPokemonModel*,
-                model,
-                { model->gameboy_status = GAMEBOY_PENDING; },
-                false);
-        } else {
+            pokemon_fap->gameboy_status = GAMEBOY_PENDING;
+        } else if((in & 0x60) == 0x60) {
             trade_centre_state = DONE;
         }
-    } else if(trade_centre_state == DONE && in == 0x00) {
-        send = 0;
-        trade_centre_state = INIT;
-        with_view_model_cpp(
-            trade->view,
-            SelectPokemonModel*,
-            model,
-            { model->gameboy_status = GAMEBOY_TRADING; },
-            false);
-    } else {
-        send = in;
+        break;
+
+    case DONE:
+        if(in == 0x00) {
+            send = 0;
+            trade_centre_state = INIT;
+            pokemon_fap->gameboy_status = GAMEBOY_TRADING;
+        }
+        break;
+
+    default:
+        // Do Nothing
+        break;
     }
 
     return send;
 }
 
 void transferBit(void* context) {
-    Trade* trade = (Trade*)context;
+    PokemonFap* pokemon_fap = (PokemonFap*)context;
+    furi_assert(context);
 
     byte raw_data = furi_hal_gpio_read(&GAME_BOY_SI);
     in_data |= raw_data << (7 - shift);
     if(++shift > 7) {
         shift = 0;
-        if(connection_state == NOT_CONNECTED) {
-            with_view_model_cpp(
-                trade->view, SelectPokemonModel*, model, { model->connected = false; }, true);
+        switch(connection_state) {
+        case NOT_CONNECTED:
+            pokemon_fap->connected = false;
             out_data = getConnectResponse(in_data);
-        } else if(connection_state == CONNECTED) {
-            with_view_model_cpp(
-                trade->view, SelectPokemonModel*, model, { model->connected = true; }, true);
+            break;
+        case CONNECTED:
+            pokemon_fap->connected = true;
             out_data = getMenuResponse(in_data);
-        } else if(connection_state == TRADE_CENTRE) {
-            out_data = getTradeCentreResponse(in_data, trade);
-
-        } else {
+            break;
+        case TRADE_CENTRE:
+            out_data = getTradeCentreResponse(in_data, pokemon_fap);
+            break;
+        default:
             out_data = in_data;
+            break;
         }
 
-        in_data = 0;
+        in_data = 0; // TODO: I don't think this is necessary?
     }
+
     while(procesing && !furi_hal_gpio_read(&GAME_BOY_CLK))
         ;
+
     furi_hal_gpio_write(&GAME_BOY_SO, out_data & 0x80 ? true : false);
     furi_delay_us(
         DELAY_MICROSECONDS); // Wait 20-60us ... 120us max (in slave mode is not necessary)
+    // TODO: The above comment doesn't make sense as DELAY_MICROSECONDS is defined as 15
 
-    if(trade_centre_state == READY_TO_GO) {
-        with_view_model_cpp(
-            trade->view, SelectPokemonModel*, model, { model->trading = true; }, true);
-    }
+    if(trade_centre_state == READY_TO_GO) pokemon_fap->trading = true;
+
     out_data = out_data << 1;
 }
+
 void input_clk_gameboy(void* context) {
     furi_assert(context);
+
     if(time > 0) {
         //  if there is no response from the master in 120 microseconds, the counters are reset
         if(micros() - time > 120) {
@@ -298,23 +401,18 @@ void input_clk_gameboy(void* context) {
     transferBit(context);
     time = micros();
 }
-void trade_enter_callback(void* context) {
-    furi_assert(context);
-    Trade* trade = (Trade*)context;
-    with_view_model_cpp(
-        trade->view,
-        SelectPokemonModel*,
-        model,
-        {
-            model->current_pokemon = trade->app->current_pokemon;
-            model->pokemon_hex_code = trade->app->pokemon_hex_code;
-            model->trading = false;
-            model->connected = false;
-            model->gameboy_status = GAMEBOY_INITIAL;
-        },
-        true);
 
-    DATA_BLOCK[12] = trade->app->pokemon_hex_code;
+void trade_enter_callback(void* context) {
+    PokemonFap* pokemon_fap = (PokemonFap*)context;
+    furi_assert(context);
+
+    pokemon_fap->trading = false;
+    pokemon_fap->connected = false;
+    pokemon_fap->gameboy_status = GAMEBOY_INITIAL;
+
+    pokemon_fap->trade_party->party_members[0] =
+        pokemon_fap->pokemon_table[pokemon_fap->curr_pokemon].species;
+
     // B3 (Pin6) / SO (2)
     furi_hal_gpio_write(&GAME_BOY_SO, false);
     furi_hal_gpio_init(&GAME_BOY_SO, GpioModeOutputPushPull, GpioPullNo, GpioSpeedVeryHigh);
@@ -328,7 +426,7 @@ void trade_enter_callback(void* context) {
         GpioPullNo,
         GpioSpeedVeryHigh); // <-- This line causes the "OK" to stop functioning when exiting the application, so a reboot of the Flipper Zero is required.
     furi_hal_gpio_remove_int_callback(&GAME_BOY_CLK);
-    furi_hal_gpio_add_int_callback(&GAME_BOY_CLK, input_clk_gameboy, trade);
+    furi_hal_gpio_add_int_callback(&GAME_BOY_CLK, input_clk_gameboy, pokemon_fap);
 
     // furi_hal_gpio_disable_int_callback(&GAME_BOY_CLK);
     // furi_hal_gpio_remove_int_callback(&GAME_BOY_CLK);
@@ -338,15 +436,17 @@ void trade_enter_callback(void* context) {
 
 bool trade_custom_callback(uint32_t event, void* context) {
     UNUSED(event);
+    PokemonFap* pokemon_fap = (PokemonFap*)context;
     furi_assert(context);
-    Trade* trade = (Trade*)context;
-    view_dispatcher_send_custom_event(trade->app->view_dispatcher, 0);
+    view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, 0);
     return true;
 }
+
 void disconnect_pin(const GpioPin* pin) {
     furi_hal_gpio_init(pin, GpioModeAnalog, GpioPullNo, GpioSpeedLow);
     furi_hal_gpio_write(pin, true);
 }
+
 void trade_exit_callback(void* context) {
     furi_assert(context);
     procesing = false;
@@ -354,35 +454,33 @@ void trade_exit_callback(void* context) {
     furi_hal_light_set(LightBlue, 0x00);
     furi_hal_light_set(LightRed, 0x00);
 }
-Trade* trade_alloc(App* app) {
-    Trade* trade = (Trade*)malloc(sizeof(Trade));
-    trade->app = app;
-    trade->view = view_alloc();
+
+View* trade_alloc(PokemonFap* pokemon_fap) {
+    View* view;
+
+    view = view_alloc();
     procesing = true;
-    view_set_context(trade->view, trade);
-    view_allocate_model(trade->view, ViewModelTypeLockFree, sizeof(SelectPokemonModel));
 
-    view_set_draw_callback(trade->view, trade_draw_callback);
-    view_set_input_callback(trade->view, trade_input_callback);
-    view_set_enter_callback(trade->view, trade_enter_callback);
-    view_set_custom_callback(trade->view, trade_custom_callback);
-    view_set_exit_callback(trade->view, trade_exit_callback);
+    view_set_context(view, pokemon_fap);
+    view_allocate_model(view, ViewModelTypeLockFree, sizeof(PokemonFap**));
+    with_view_model_cpp(
+        view, PokemonFap**, model_fap, { *model_fap = pokemon_fap; }, false);
 
-    return trade;
+    view_set_draw_callback(view, trade_draw_callback);
+    view_set_input_callback(view, trade_input_callback);
+    view_set_enter_callback(view, trade_enter_callback);
+    view_set_custom_callback(view, trade_custom_callback);
+    view_set_exit_callback(view, trade_exit_callback);
+
+    return view;
 }
 
-void trade_free(App* app) {
-    furi_assert(app);
+void trade_free(PokemonFap* pokemon_fap) {
+    furi_assert(pokemon_fap);
     // Free resources
     procesing = false;
     furi_hal_gpio_remove_int_callback(&GAME_BOY_CLK);
 
     disconnect_pin(&GAME_BOY_CLK);
-    view_free(app->trade->view);
-    free(app->trade);
-}
-
-View* trade_get_view(App* app) {
-    furi_assert(app);
-    return app->trade->view;
+    view_free(pokemon_fap->trade_view);
 }
