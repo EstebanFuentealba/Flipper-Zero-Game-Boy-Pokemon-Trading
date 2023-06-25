@@ -8,8 +8,8 @@
 #define TAG "Pokemon"
 
 struct pokemon_data_table {
-    const char *name;
-    const Icon *icon;
+    const char* name;
+    const Icon* icon;
     const uint8_t species;
 };
 
@@ -26,7 +26,7 @@ typedef enum {
 } render_gameboy_state_t;
 
 struct pokemon_fap {
-    ViewDispatcher *view_dispatcher;
+    ViewDispatcher* view_dispatcher;
 
     /* View ports for each of the application's steps */
     View* select_view;

@@ -35,65 +35,64 @@ static bool select_pokemon_input_callback(InputEvent* event, void* context) {
     furi_assert(context);
 
     /* We only handle InputTypePress at the moment */
-    if (event->type != InputTypePress)
-        return consumed;
+    if(event->type != InputTypePress) return consumed;
 
-    switch (event->key) {
-        /* Advance to next view with the selected pokemon */
-        case InputKeyOk:
-            view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewTrade);
-            consumed = true;
-            break;
+    switch(event->key) {
+    /* Advance to next view with the selected pokemon */
+    case InputKeyOk:
+        view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewTrade);
+        consumed = true;
+        break;
 
-        /* Return to the previous view */
-        case InputKeyBack:
-            view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, VIEW_NONE);
-            consumed = true;
-            break;
+    /* Return to the previous view */
+    case InputKeyBack:
+        view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, VIEW_NONE);
+        consumed = true;
+        break;
 
-        /* Move back one through the pokedex listing */
-        case InputKeyLeft:
-            if (pokemon_num == 0)
-                pokemon_num = 150;
-            else
-                pokemon_num--;
-            consumed = true;
-            break;
+    /* Move back one through the pokedex listing */
+    case InputKeyLeft:
+        if(pokemon_num == 0)
+            pokemon_num = 150;
+        else
+            pokemon_num--;
+        consumed = true;
+        break;
 
-        /* Move back ten through the pokemon listing, wrap to max pokemon on
+    /* Move back ten through the pokemon listing, wrap to max pokemon on
          * underflow.
          */
-        case InputKeyDown:
-            if (pokemon_num >= 10)
-                pokemon_num -= 10;
-            else
-                pokemon_num = 150;
-            consumed = true;
-            break;
+    case InputKeyDown:
+        if(pokemon_num >= 10)
+            pokemon_num -= 10;
+        else
+            pokemon_num = 150;
+        consumed = true;
+        break;
 
-        /* Move forward one through the pokedex listing */
-        case InputKeyRight:
-            if (pokemon_num == 150)
-                pokemon_num = 0;
-            else
-                pokemon_num++;
-            consumed = true;
-            break;
+    /* Move forward one through the pokedex listing */
+    case InputKeyRight:
+        if(pokemon_num == 150)
+            pokemon_num = 0;
+        else
+            pokemon_num++;
+        consumed = true;
+        break;
 
-        /* Move forward ten through the pokemon listing, wrap to min pokemon on
+    /* Move forward ten through the pokemon listing, wrap to min pokemon on
          * overflow.
          */
-        case InputKeyUp:
-            if (pokemon_num <= 140)
-                pokemon_num += 10;
-            else
-                pokemon_num = 0;
-            consumed = true;
-            break;
+    case InputKeyUp:
+        if(pokemon_num <= 140)
+            pokemon_num += 10;
+        else
+            pokemon_num = 0;
+        consumed = true;
+        break;
 
-        default:
-            // Do Nothing
-            break;
+    default:
+        // Do Nothing
+        break;
     }
 
     pokemon_fap->curr_pokemon = pokemon_num;
@@ -127,13 +126,7 @@ View* select_pokemon_alloc(PokemonFap* pokemon_fap) {
     view_set_context(view, pokemon_fap);
     view_allocate_model(view, ViewModelTypeLockFree, sizeof(PokemonFap**));
     with_view_model_cpp(
-        view,
-        PokemonFap**,
-        model_fap,
-        {
-            *model_fap = pokemon_fap;
-        },
-        false);
+        view, PokemonFap**, model_fap, { *model_fap = pokemon_fap; }, false);
 
     view_set_draw_callback(view, select_pokemon_render_callback);
     view_set_input_callback(view, select_pokemon_input_callback);
