@@ -1,5 +1,11 @@
+#include <furi.h>
+#include <gui/view.h>
+#include <gui/view_dispatcher.h>
+#include <gui/elements.h>
+#include <pokemon_icons.h>
+#include <string>
+
 #include "../pokemon_app.h"
-#include "select_pokemon.hpp"
 
 static void select_pokemon_render_callback(Canvas* canvas, void* model) {
     PokemonFap* pokemon_fap = *(PokemonFap**)model;

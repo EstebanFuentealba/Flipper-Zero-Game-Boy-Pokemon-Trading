@@ -1,3 +1,11 @@
+#include <furi.h>
+#include <furi_hal_light.h>
+#include <gui/gui.h>
+#include <gui/view.h>
+#include <gui/view_dispatcher.h>
+#include <gui/icon.h>
+#include <pokemon_icons.h>
+
 #include "pokemon_app.h"
 #include "views/trade.hpp"
 #include "views/select_pokemon.hpp"
